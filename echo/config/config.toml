@@ -1,6 +1,6 @@
 
 [general]
-  clientName = "Marcos"
+
 
 [sqs]
   inboxURL = "https://sqs.eu-west-2.amazonaws.com/049513327431/TA-inbox"
