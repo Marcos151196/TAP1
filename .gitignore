@@ -1,0 +1,11 @@
+client/vendor
+client/go.mod
+client/go.sum
+client/.vscode
+client/client
+echo/vendor
+echo/go.mod
+echo/go.sum
+echo/.vscode
+echo/echo
+
