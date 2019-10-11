@@ -1,0 +1,15 @@
+
+[general]
+
+
+[sqs]
+  inboxURL = "https://sqs.eu-west-2.amazonaws.com/049513327431/TA-inbox"
+  outboxURL = "https://sqs.eu-west-2.amazonaws.com/049513327431/TA-outbox"
+
+[log]
+  fileout = false
+  level = "info"
+  logfilepath = "/tmp"
+  stdout = true
+  jsonformat = false
+
