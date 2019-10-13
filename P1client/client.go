@@ -7,14 +7,14 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	sqs "github.com/aws/aws-sdk-go/service/sqs"
 	log "github.com/sirupsen/logrus"
 	viper "github.com/theherk/viper"
@@ -35,120 +35,149 @@ var msgPrinted = make(chan bool, 1)
 
 func main() {
 	initConfig()
-	keyboardInterr := make(chan os.Signal, 1)
-	signal.Notify(keyboardInterr, os.Interrupt, syscall.SIGTERM)
 
-	// SET READER
-	reader := bufio.NewReader(os.Stdin)
-	log.Infof("Client name: %s\n\n", clientName)
-	fmt.Printf("1-ECHO\n2-SEARCH\n3-DOWNLOAD\nSelect the command(number + ENTER): ")
 	for {
-		c, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Printf("Could not read command: %v. Try again: ", err)
-			continue
-		}
-
-		c = strings.TrimSuffix(c, "\n")
-		command, err = strconv.Atoi(c)
-		if err != nil || (command != 1 && command != 2 && command != 3) {
-			fmt.Printf("Invalid command, try again: ")
-			continue
-		} else {
-			fmt.Printf("Command %d selected.\n", command)
-			break
-		}
-	}
-
-	// RECEIVE MSGS
-	go func() {
+		// MAIN MENU
+		reader := bufio.NewReader(os.Stdin)
+		log.Infof("Client name: %s\n\n", clientName)
+		fmt.Printf("1-ECHO\n2-SEARCH\n3-DOWNLOAD\nSelect the command(number + ENTER): ")
 		for {
-			RXmsginput := &sqs.ReceiveMessageInput{
-				MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd"}),
-				QueueUrl:              &outboxURL,
-				MaxNumberOfMessages:   aws.Int64(1),
-				WaitTimeSeconds:       aws.Int64(5),
-			}
-
-			// READ MSG
-			resultRX, err := svc.ReceiveMessage(RXmsginput)
+			c, err := reader.ReadString('\n')
 			if err != nil {
-				log.Errorf("Error while receiving message: %v", err)
+				fmt.Printf("Could not read command: %v. Try again: ", err)
 				continue
 			}
 
-			if len(resultRX.Messages) == 0 {
-				continue
-			}
-			msgRX := *resultRX.Messages[0]
-			textRX := *msgRX.Body
-			sessIDRX := *msgRX.MessageAttributes["sessionID"].StringValue
-			cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
-			cRX, _ := strconv.Atoi(cmdRX)
-			// log.Warnf("RX MSGGGG: %s", textRX)
-			if sessID != sessIDRX {
-				svc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
-					QueueUrl:          &outboxURL,
-					ReceiptHandle:     msgRX.ReceiptHandle,
-					VisibilityTimeout: aws.Int64(0),
-				})
-				continue
-			}
-
-			if cRX == 1 {
-				log.Infof("Echoed message: %s", textRX)
-			}
-			err = DeleteMSGSQS(resultRX)
-			if err != nil {
-				log.Errorf("Could not delete msg after processing: %v", err)
-			}
-
-		}
-	}()
-
-	// MESSAGE SENDING LOOP
-	go func() {
-		for {
-			fmt.Printf("Write the message you want to echo: ")
-			text, err := reader.ReadString('\n')
-			if err != nil {
-				log.Errorf("Could not read string: %v", err)
-			}
-			text = strings.TrimSuffix(text, "\n")
-
-			sessID = StringWithCharset(6)
-
-			msg := &sqs.SendMessageInput{
-				MessageAttributes: map[string]*sqs.MessageAttributeValue{
-					"clientName": &sqs.MessageAttributeValue{
-						DataType:    aws.String("String"),
-						StringValue: aws.String(clientName),
-					},
-					"sessionID": &sqs.MessageAttributeValue{
-						DataType:    aws.String("String"),
-						StringValue: aws.String(sessID),
-					},
-					"cmd": &sqs.MessageAttributeValue{
-						DataType:    aws.String("String"),
-						StringValue: aws.String(fmt.Sprintf("%d", command)),
-					},
-				},
-				MessageBody: aws.String(text),
-				QueueUrl:    &inboxURL,
-			}
-
-			log.Infof("Sending message to AWS: %s", text)
-			result, err := svc.SendMessage(msg)
-			if err != nil {
-				log.Errorf("Could not send message to SQS queue: %v", err)
+			c = strings.TrimSuffix(c, "\n")
+			command, err = strconv.Atoi(c)
+			if err != nil || (command != 1 && command != 2 && command != 3) {
+				fmt.Printf("Invalid command, try again: ")
 				continue
 			} else {
-				log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
+				fmt.Printf("Command %d selected.\n", command)
+				break
 			}
 		}
-	}()
 
-	<-keyboardInterr
+		// RECEIVE MSGS
+		go func() {
+			for {
+				RXmsginput := &sqs.ReceiveMessageInput{
+					MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd"}),
+					QueueUrl:              &outboxURL,
+					MaxNumberOfMessages:   aws.Int64(1),
+					WaitTimeSeconds:       aws.Int64(5),
+				}
+
+				// READ MSG
+				resultRX, err := svc.ReceiveMessage(RXmsginput)
+				if err != nil {
+					log.Errorf("Error while receiving message: %v", err)
+					continue
+				}
+
+				if len(resultRX.Messages) == 0 {
+					continue
+				}
+				msgRX := *resultRX.Messages[0]
+				textRX := *msgRX.Body
+				sessIDRX := *msgRX.MessageAttributes["sessionID"].StringValue
+				cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
+				cRX, _ := strconv.Atoi(cmdRX)
+				if sessID != sessIDRX {
+					svc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+						QueueUrl:          &outboxURL,
+						ReceiptHandle:     msgRX.ReceiptHandle,
+						VisibilityTimeout: aws.Int64(0),
+					})
+					continue
+				}
+
+				// ECHO
+				if cRX == 1 {
+					log.Infof("Echoed message: %s", textRX)
+				}
+				err = DeleteMSGSQS(resultRX)
+				if err != nil {
+					log.Errorf("Could not delete msg after processing: %v", err)
+				}
+
+			}
+		}()
+
+		// MESSAGE SENDING LOOP
+		for {
+			if command == 1 {
+				fmt.Printf("Write the message you want to echo: ")
+				text, err := reader.ReadString('\n')
+				if err != nil {
+					log.Errorf("Could not read string: %v", err)
+				}
+				text = strings.TrimSuffix(text, "\n")
+
+				sessID = StringWithCharset(6)
+				timestamp := time.Now().Format("02-Jan-2006 15:04:05")
+
+				msg := &sqs.SendMessageInput{
+					MessageAttributes: map[string]*sqs.MessageAttributeValue{
+						"clientName": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(clientName),
+						},
+						"sessionID": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(sessID),
+						},
+						"timestamp": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(timestamp),
+						},
+						"cmd": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(fmt.Sprintf("%d", command)),
+						},
+					},
+					MessageBody: aws.String(text),
+					QueueUrl:    &inboxURL,
+				}
+
+				log.Infof("Sending message to AWS: %s", text)
+				result, err := svc.SendMessage(msg)
+				if err != nil {
+					log.Errorf("Could not send message to SQS queue: %v", err)
+					continue
+				} else {
+					log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
+					if text == "END" {
+						break
+					}
+				}
+			} else if command == 2 {
+				fmt.Printf("Write the name of the client: ")
+				text, err := reader.ReadString('\n')
+				if err != nil {
+					log.Errorf("Could not read string: %v", err)
+				}
+				text = strings.TrimSuffix(text, "\n")
+
+				sessID = StringWithCharset(6)
+			} else if command == 3 {
+				fmt.Printf("Write the name of the client: ")
+				client, err := reader.ReadString('\n')
+				if err != nil {
+					log.Errorf("Could not read string: %v", err)
+					break
+				}
+				client = strings.TrimSuffix(client, "\n")
+				err = DownloadConversation(client)
+				if err != nil {
+					log.Errorf("Could not download conversation %v", err)
+				}
+				break
+			}
+		}
+
+	}
 
 }
 
@@ -237,4 +266,27 @@ func StringWithCharset(length int) string {
 	}
 	return string(b)
 }
- 
+
+func DownloadConversation(client string) error {
+
+	// Create a downloader with the session and default options
+	downloader := s3manager.NewDownloader(sess)
+	filename := fmt.Sprintf("downloadedConv/%s.txt", client)
+	// Create a file to write the S3 Object contents to.
+	f, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("Failed to create file %q, %v", filename, err)
+	}
+
+	downloadPath := fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client)
+	// Write the contents of S3 Object to the file
+	n, err := downloader.Download(f, &s3.GetObjectInput{
+		Bucket: aws.String(viper.GetString("s3.bucketname")),
+		Key:    aws.String(downloadPath),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to download file, %v", err)
+	}
+	log.Infof("File %s.txt downloaded, %d bytes.", client, n)
+	return nil
+}

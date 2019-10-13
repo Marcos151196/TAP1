@@ -1,6 +1,10 @@
 
 [general]
 
+[s3]
+  bucketname = "tap1"
+  conversationspath = "conversations"
+
 
 [sqs]
   inboxURL = "https://sqs.eu-west-2.amazonaws.com/049513327431/TA-inbox"
