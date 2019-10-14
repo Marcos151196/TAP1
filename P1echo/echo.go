@@ -87,12 +87,6 @@ func main() {
 				text := *msg.Body
 				if text == "END" {
 					log.Infof("End of conversation with %s", clientName)
-					err := UploadFileToS3(clientName)
-					if err != nil {
-						log.Errorf("Could not upload conversation to S3: %v", err)
-					}
-					DeleteTemporalConversation(clientName)
-					DeleteTemporalConversation(clientName + "_new")
 					msgProcessed <- true
 				} else {
 					msgTX := &sqs.SendMessageInput{
@@ -117,7 +111,11 @@ func main() {
 						MessageBody: aws.String(text),
 						QueueUrl:    &outboxURL,
 					}
-					StoreNewLine(clientName, text, timestamp)
+					err := StoreNewLine(clientName, sessID, text, timestamp)
+					if err != nil {
+						log.Errorf("Could not upload conversation to S3: %v", err)
+					}
+					DeleteTemporalConversation(clientName + "_" + sessID)
 					log.Infof("Echoing message. Client: %s\tContent: %s", clientName, text)
 					result, err := svc.SendMessage(msgTX)
 					if err != nil {
@@ -223,25 +221,37 @@ func DownloadConversation(client string) error {
 	return nil
 }
 
-func StoreNewLine(client string, body string, timestamp string) error {
-	f, err := os.OpenFile(fmt.Sprintf("tmpConv/%s_new.txt", client), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+func StoreNewLine(client string, sessID string, body string, timestamp string) error {
+	err := DownloadConversation(client + "_" + sessID)
 	if err != nil {
-		log.Errorf("Could not open/create file: %v", err)
-		return err
+		log.Warnf("Could not download document before adding new line: %v", err)
+	}
+	f, err := os.OpenFile(fmt.Sprintf("tmpConv/%s.txt", client+"_"+sessID), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("Could not open/create file: %v", err)
 	}
 
 	_, err = f.WriteString(fmt.Sprintf("%s|||%s\n", timestamp, body))
 	if err != nil {
-		log.Warnf("Could not write new line to file: %v", err)
 		f.Close()
-		return err
+		return fmt.Errorf("Could not write new line to file: %v", err)
 	}
+	log.Infof("New line written succesfully!")
+	f.Close()
 
-	log.Debugf("New line written succesfully!")
+	fileName := fmt.Sprintf("tmpConv/%s.txt", client+"_"+sessID)
+	f, err = os.Open(fileName)
+	if err != nil {
+		return fmt.Errorf("Failed to open file %q, %v", fileName, err)
+	}
+	err = UploadFileToS3(client, f, sessID)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("Could not upload file to S3: %v", err)
+	}
 	err = f.Close()
 	if err != nil {
-		log.Errorf("Could not save and close file: %v", err)
-		return err
+		return fmt.Errorf("Could not save and close file: %v", err)
 	}
 
 	return nil
@@ -258,43 +268,12 @@ func DeleteTemporalConversation(client string) error {
 }
 
 // UploadFileToS3 saves a file to aws bucket and returns the url to the file and an error if there's any
-func UploadFileToS3(client string) error {
+func UploadFileToS3(client string, f *os.File, sessID string) error {
 
-	newFileName := "tmpConv/" + client + "_new.txt"
-	oldFileName := "tmpConv/" + client + ".txt"
-	err := DownloadConversation(client)
-	old, err := os.OpenFile(oldFileName, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("Could not open old file for writing: %v", err)
-	}
-	defer old.Close()
-
-	new, err := os.Open(newFileName)
-	if err != nil {
-		return fmt.Errorf("Failed to open new file for reading: %v", err)
-	}
-	defer new.Close()
-
-	n, err := io.Copy(old, new)
-	if err != nil {
-		return fmt.Errorf("Failed to append new file to old: %v", err)
-	}
-	log.Infof("Wrote %d bytes of %s to the end of %s\n", n, newFileName, oldFileName)
-
-	new.Close()
-	old.Close()
-
-	// Create an uploader with the session and default options
-	uploader := s3manager.NewUploader(sess)
-	filename := fmt.Sprintf("tmpConv/%s.txt", client)
-	f, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("Failed to open file %q, %v", filename, err)
-	}
-
-	uploadPath := fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client)
+	uploadPath := fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client+"_"+sessID)
 	// Upload the file to S3.
-	_, err = uploader.Upload(&s3manager.UploadInput{
+	uploader := s3manager.NewUploader(sess)
+	_, err := uploader.Upload(&s3manager.UploadInput{
 		Bucket: aws.String(viper.GetString("s3.bucketname")),
 		Key:    aws.String(uploadPath),
 		Body:   f,

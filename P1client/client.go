@@ -13,7 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	s3 "github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	sqs "github.com/aws/aws-sdk-go/service/sqs"
 	log "github.com/sirupsen/logrus"
@@ -35,6 +35,7 @@ var msgPrinted = make(chan bool, 1)
 
 func main() {
 	initConfig()
+	sessID = StringWithCharset(6)
 
 	for {
 		// MAIN MENU
@@ -96,6 +97,8 @@ func main() {
 				// ECHO
 				if cRX == 1 {
 					log.Infof("Echoed message: %s", textRX)
+				} else if cRX == 2 {
+					PrintFilteredFile(textRX)
 				}
 				err = DeleteMSGSQS(resultRX)
 				if err != nil {
@@ -115,7 +118,6 @@ func main() {
 				}
 				text = strings.TrimSuffix(text, "\n")
 
-				sessID = StringWithCharset(6)
 				timestamp := time.Now().Format("02-Jan-2006 15:04:05")
 
 				msg := &sqs.SendMessageInput{
@@ -154,13 +156,54 @@ func main() {
 				}
 			} else if command == 2 {
 				fmt.Printf("Write the name of the client: ")
-				text, err := reader.ReadString('\n')
+				clientSearch, err := reader.ReadString('\n')
 				if err != nil {
 					log.Errorf("Could not read string: %v", err)
 				}
-				text = strings.TrimSuffix(text, "\n")
+				clientSearch = strings.TrimSuffix(clientSearch, "\n")
 
-				sessID = StringWithCharset(6)
+				fmt.Printf("Write the sentence to search: ")
+				sentenceSearch, err := reader.ReadString('\n')
+				if err != nil {
+					log.Errorf("Could not read string: %v", err)
+				}
+				sentenceSearch = strings.TrimSuffix(sentenceSearch, "\n")
+
+				timestamp := time.Now().Format("02-Jan-2006 15:04:05")
+
+				msg := &sqs.SendMessageInput{
+					MessageAttributes: map[string]*sqs.MessageAttributeValue{
+						"clientName": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(clientSearch),
+						},
+						"sessionID": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(sessID),
+						},
+						"timestamp": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(timestamp),
+						},
+						"cmd": &sqs.MessageAttributeValue{
+							DataType:    aws.String("String"),
+							StringValue: aws.String(fmt.Sprintf("%d", command)),
+						},
+					},
+					MessageBody: aws.String(sentenceSearch),
+					QueueUrl:    &inboxURL,
+				}
+
+				log.Infof("Sending search command to AWS")
+				result, err := svc.SendMessage(msg)
+				if err != nil {
+					log.Errorf("Could not send message to SQS queue: %v", err)
+					continue
+				} else {
+					log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
+					break
+				}
+
 			} else if command == 3 {
 				fmt.Printf("Write the name of the client: ")
 				client, err := reader.ReadString('\n')
@@ -268,25 +311,79 @@ func StringWithCharset(length int) string {
 }
 
 func DownloadConversation(client string) error {
+	s3svc := s3.New(sess)
+	bucketname := viper.GetString("s3.bucketname")
+	resp, err := s3svc.ListObjectsV2(&s3.ListObjectsV2Input{Bucket: aws.String(bucketname), Prefix: aws.String(viper.GetString("s3.conversationspath") + "/" + client)})
+	if err != nil {
+		return fmt.Errorf("Unable to list items in bucket %q, %v", bucketname, err)
+	}
 
 	// Create a downloader with the session and default options
 	downloader := s3manager.NewDownloader(sess)
-	filename := fmt.Sprintf("downloadedConv/%s.txt", client)
-	// Create a file to write the S3 Object contents to.
-	f, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("Failed to create file %q, %v", filename, err)
+	for _, item := range resp.Contents {
+		downloadPath := *item.Key
+		// txtname := filepath.Base(downloadPath)
+		// Create a file to write the S3 Object contents to.
+		f, err := os.OpenFile(downloadPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			return fmt.Errorf("Failed to create file %q, %v", downloadPath, err)
+		}
+
+		// Write the contents of S3 Object to the file
+		_, err = downloader.Download(f, &s3.GetObjectInput{
+			Bucket: aws.String(bucketname),
+			Key:    aws.String(downloadPath),
+		})
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("failed to download file, %v", err)
+		}
 	}
 
-	downloadPath := fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client)
-	// Write the contents of S3 Object to the file
-	n, err := downloader.Download(f, &s3.GetObjectInput{
-		Bucket: aws.String(viper.GetString("s3.bucketname")),
-		Key:    aws.String(downloadPath),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to download file, %v", err)
-	}
-	log.Infof("File %s.txt downloaded, %d bytes.", client, n)
+	CombineSessionsToFile(client, resp)
+	log.Infof("Whole conversation of client %s has been downloaded.", client)
 	return nil
+}
+
+func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
+	newFileName := "conversations/" + client + ".txt"
+	os.Remove(newFileName)
+	newFile, err := os.OpenFile(newFileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	defer newFile.Close()
+	if err != nil {
+		return fmt.Errorf("Failed to create file %q: %v", newFileName, err)
+	}
+	for _, item := range items.Contents {
+		pieceFile, err := os.Open(*item.Key)
+		if err != nil {
+			log.Warnf("Failed to open piece file for reading: %v", err)
+		}
+		defer pieceFile.Close()
+
+		n, err := io.Copy(newFile, pieceFile)
+		if err != nil {
+			log.Warnf("Failed to append piece file to big file: %v", err)
+		}
+		log.Infof("Wrote %d bytes of %s to the end of %s\n", n, *item.Key, newFileName)
+
+		// Delete the old input file
+		pieceFile.Close()
+		if err := os.Remove(*item.Key); err != nil {
+			log.Errorf("Failed to remove piece file %s: %v", *item.Key, err)
+		}
+	}
+	newFile.Close()
+	return nil
+}
+
+func PrintFilteredFile(file string) {
+	fmt.Println("\nFiltered conversation:")
+	lines := strings.Split(file, "///")
+	for _, line := range lines {
+		if line != "" {
+			columns := strings.Split(line, "|||")
+			fmt.Printf("%s\t%s\n", columns[0], columns[1])
+		}
+	}
+	fmt.Println("")
 }
