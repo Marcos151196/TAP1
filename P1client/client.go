@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	aws "github.com/aws/aws-sdk-go/aws"
+	session "github.com/aws/aws-sdk-go/aws/session"
 	s3 "github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	s3manager "github.com/aws/aws-sdk-go/service/s3/s3manager"
 	sqs "github.com/aws/aws-sdk-go/service/sqs"
 	log "github.com/sirupsen/logrus"
 	viper "github.com/theherk/viper"
@@ -29,17 +29,25 @@ var sessID string
 var sess *session.Session = session.Must(session.NewSessionWithOptions(session.Options{
 	SharedConfigState: session.SharedConfigEnable,
 }))
-var svc *sqs.SQS = sqs.New(sess)
-var msgSent = make(chan bool, 1)
-var msgPrinted = make(chan bool, 1)
+var sqssvc *sqs.SQS = sqs.New(sess)
 
 func main() {
-	initConfig()
-	sessID = StringWithCharset(6)
+	initConfig()                  // Set config file, logs and queues URLs
+	sessID = StringWithCharset(6) // Generate random session ID
 
+	// READ USERNAME FROM CONSOLE
+	fmt.Printf("Write your user name: ")
+	reader := bufio.NewReader(os.Stdin)
+	clientName, err := reader.ReadString('\n')
+	if err != nil {
+		log.Errorf("Could not read string: %v", err)
+	}
+	clientName = strings.TrimSuffix(clientName, "\n")
+	log.Infof("USER: %s\tSESSION_ID: %s", clientName, sessID)
+
+	// MAIN LOOP
 	for {
 		// MAIN MENU
-		reader := bufio.NewReader(os.Stdin)
 		log.Infof("Client name: %s\n\n", clientName)
 		fmt.Printf("1-ECHO\n2-SEARCH\n3-DOWNLOAD\nSelect the command(number + ENTER): ")
 		for {
@@ -60,57 +68,12 @@ func main() {
 			}
 		}
 
-		// RECEIVE MSGS
-		go func() {
-			for {
-				RXmsginput := &sqs.ReceiveMessageInput{
-					MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd"}),
-					QueueUrl:              &outboxURL,
-					MaxNumberOfMessages:   aws.Int64(1),
-					WaitTimeSeconds:       aws.Int64(5),
-				}
-
-				// READ MSG
-				resultRX, err := svc.ReceiveMessage(RXmsginput)
-				if err != nil {
-					log.Errorf("Error while receiving message: %v", err)
-					continue
-				}
-
-				if len(resultRX.Messages) == 0 {
-					continue
-				}
-				msgRX := *resultRX.Messages[0]
-				textRX := *msgRX.Body
-				sessIDRX := *msgRX.MessageAttributes["sessionID"].StringValue
-				cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
-				cRX, _ := strconv.Atoi(cmdRX)
-				if sessID != sessIDRX {
-					svc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
-						QueueUrl:          &outboxURL,
-						ReceiptHandle:     msgRX.ReceiptHandle,
-						VisibilityTimeout: aws.Int64(0),
-					})
-					continue
-				}
-
-				// ECHO
-				if cRX == 1 {
-					log.Infof("Echoed message: %s", textRX)
-				} else if cRX == 2 {
-					PrintFilteredFile(textRX)
-				}
-				err = DeleteMSGSQS(resultRX)
-				if err != nil {
-					log.Errorf("Could not delete msg after processing: %v", err)
-				}
-
-			}
-		}()
+		// RECEIVE MESSAGES THREAD
+		go ReceiveMSGS()
 
 		// MESSAGE SENDING LOOP
 		for {
-			if command == 1 {
+			if command == 1 { // ECHO
 				fmt.Printf("Write the message you want to echo: ")
 				text, err := reader.ReadString('\n')
 				if err != nil {
@@ -143,8 +106,8 @@ func main() {
 					QueueUrl:    &inboxURL,
 				}
 
-				log.Infof("Sending message to AWS: %s", text)
-				result, err := svc.SendMessage(msg)
+				log.Infof("Sending message to AWS echo app. MESSAGE: %s", text)
+				result, err := sqssvc.SendMessage(msg)
 				if err != nil {
 					log.Errorf("Could not send message to SQS queue: %v", err)
 					continue
@@ -154,8 +117,8 @@ func main() {
 						break
 					}
 				}
-			} else if command == 2 {
-				fmt.Printf("Write the name of the client: ")
+			} else if command == 2 { // SEARCH
+				fmt.Printf("Write the name of the user of the conversations you want to search in: ")
 				clientSearch, err := reader.ReadString('\n')
 				if err != nil {
 					log.Errorf("Could not read string: %v", err)
@@ -194,8 +157,8 @@ func main() {
 					QueueUrl:    &inboxURL,
 				}
 
-				log.Infof("Sending search command to AWS")
-				result, err := svc.SendMessage(msg)
+				log.Infof("Sending search command to AWS search app. KEYWORD: %s", sentenceSearch)
+				result, err := sqssvc.SendMessage(msg)
 				if err != nil {
 					log.Errorf("Could not send message to SQS queue: %v", err)
 					continue
@@ -204,15 +167,15 @@ func main() {
 					break
 				}
 
-			} else if command == 3 {
-				fmt.Printf("Write the name of the client: ")
-				client, err := reader.ReadString('\n')
+			} else if command == 3 { // DOWNLOAD
+				fmt.Printf("Write the name of the user you want to download: ")
+				clientDownload, err := reader.ReadString('\n')
 				if err != nil {
 					log.Errorf("Could not read string: %v", err)
 					break
 				}
-				client = strings.TrimSuffix(client, "\n")
-				err = DownloadConversation(client)
+				clientDownload = strings.TrimSuffix(clientDownload, "\n")
+				err = DownloadConversation(clientDownload)
 				if err != nil {
 					log.Errorf("Could not download conversation %v", err)
 				}
@@ -224,9 +187,56 @@ func main() {
 
 }
 
+// RECEIVING MESSAGES FROM SQS OUTBOX QUEUE THREAD
+func ReceiveMSGS() {
+	for {
+		RXmsginput := &sqs.ReceiveMessageInput{
+			MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd"}),
+			QueueUrl:              &outboxURL,
+			MaxNumberOfMessages:   aws.Int64(1),
+			WaitTimeSeconds:       aws.Int64(1),
+		}
+
+		// READ MSG
+		resultRX, err := sqssvc.ReceiveMessage(RXmsginput)
+		if err != nil {
+			log.Errorf("Error while receiving message: %v", err)
+			continue
+		}
+
+		if len(resultRX.Messages) == 0 {
+			continue
+		}
+		msgRX := *resultRX.Messages[0]
+		textRX := *msgRX.Body
+		sessIDRX := *msgRX.MessageAttributes["sessionID"].StringValue
+		cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
+		cRX, _ := strconv.Atoi(cmdRX)
+		if sessID != sessIDRX {
+			continue
+		}
+
+		if cRX == 1 { // ECHO
+			log.Infof("Echoed message: %s", textRX)
+		} else if cRX == 2 { // SEARCH
+			if textRX == "EMPTY CONVERSATION" {
+				log.Warnf("Could not find any lines containing that sentence for that client.")
+			} else {
+				PrintFilteredFile(textRX)
+			}
+		}
+		err = DeleteMSGSQS(resultRX)
+		if err != nil {
+			log.Errorf("Could not delete msg after processing: %v", err)
+		}
+
+	}
+}
+
+// DELETE MESSAGE FROM SQS QUEUE AFTER PROCESSING IT
 func DeleteMSGSQS(resultRX *sqs.ReceiveMessageOutput) error {
 	// DELETE MSG
-	_, err := svc.DeleteMessage(&sqs.DeleteMessageInput{
+	_, err := sqssvc.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      &outboxURL,
 		ReceiptHandle: resultRX.Messages[0].ReceiptHandle,
 	})
@@ -237,6 +247,7 @@ func DeleteMSGSQS(resultRX *sqs.ReceiveMessageOutput) error {
 	return nil
 }
 
+// INIT CONFIG FILE, LOGS ETC
 func initConfig() {
 	// CONFIG FILE
 	viper.SetConfigFile(cfgFile)
@@ -248,7 +259,6 @@ func initConfig() {
 	}
 
 	// LOGGING SETTINGS
-	clientName = viper.GetString("general.clientName")
 	logFile = fmt.Sprintf("%s/%s.log", viper.GetString("log.logfilepath"), clientName)
 	stdoutEnabled = viper.GetBool("log.stdout")
 	fileoutEnabled = viper.GetBool("log.fileout")
@@ -294,13 +304,14 @@ func initConfig() {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
 
-	// START SQS INBOX AND OUTBOX QUEUES
+	// GET CONVERSATION PARAMETERS SPECIFIED IN CONFIG FILE
 	inboxURL = viper.GetString("sqs.inboxURL")
 	outboxURL = viper.GetString("sqs.outboxURL")
 
 	return
 }
 
+// GENERATE RANDOM SESSION ID
 func StringWithCharset(length int) string {
 	charset := "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
@@ -310,26 +321,29 @@ func StringWithCharset(length int) string {
 	return string(b)
 }
 
+// DOWNLOAD CONVERSATION DIRECTLY FROM S3 GIVEN THE USERNAME
 func DownloadConversation(client string) error {
 	s3svc := s3.New(sess)
 	bucketname := viper.GetString("s3.bucketname")
+
+	// List all conversations ([S3_CONVERSATIONS_PATH]/[USERNAME]_[SESSION_ID].txt) that begin with [S3_CONVERSATIONS_PATH]/[USERNAME]
 	resp, err := s3svc.ListObjectsV2(&s3.ListObjectsV2Input{Bucket: aws.String(bucketname), Prefix: aws.String(viper.GetString("s3.conversationspath") + "/" + client)})
 	if err != nil {
 		return fmt.Errorf("Unable to list items in bucket %q, %v", bucketname, err)
 	}
 
-	// Create a downloader with the session and default options
+	// Download every session from our user and when finished, combine all those files in a local one called [S3_CONVERSATIONS_PATH]/[USERNAME].txt
 	downloader := s3manager.NewDownloader(sess)
+	// Loop for downloading every session from our user and store them in local folder [S3_CONVERSATIONS_PATH]
 	for _, item := range resp.Contents {
 		downloadPath := *item.Key
-		// txtname := filepath.Base(downloadPath)
-		// Create a file to write the S3 Object contents to.
+		// Local session file
 		f, err := os.OpenFile(downloadPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 		if err != nil {
 			return fmt.Errorf("Failed to create file %q, %v", downloadPath, err)
 		}
 
-		// Write the contents of S3 Object to the file
+		// Write the contents of S3 session file to the local session file
 		_, err = downloader.Download(f, &s3.GetObjectInput{
 			Bucket: aws.String(bucketname),
 			Key:    aws.String(downloadPath),
@@ -340,11 +354,13 @@ func DownloadConversation(client string) error {
 		}
 	}
 
+	// Combine all sessions in [S3_CONVERSATIONS_PATH]/[USERNAME].txt
 	CombineSessionsToFile(client, resp)
 	log.Infof("Whole conversation of client %s has been downloaded.", client)
 	return nil
 }
 
+// COMBINE MULTIPLE SESSION FILES ([S3_CONVERSATIONS_PATH]/[USERNAME]_[SESSION_ID].txt) IN ONE ([S3_CONVERSATIONS_PATH]/[USERNAME].txt)
 func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
 	newFileName := "conversations/" + client + ".txt"
 	os.Remove(newFileName)
@@ -353,20 +369,23 @@ func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
 	if err != nil {
 		return fmt.Errorf("Failed to create file %q: %v", newFileName, err)
 	}
+	// Iterate over session files and append them to the combined one
 	for _, item := range items.Contents {
+		// Open session file
 		pieceFile, err := os.Open(*item.Key)
 		if err != nil {
 			log.Warnf("Failed to open piece file for reading: %v", err)
 		}
 		defer pieceFile.Close()
 
+		// Append session file
 		n, err := io.Copy(newFile, pieceFile)
 		if err != nil {
 			log.Warnf("Failed to append piece file to big file: %v", err)
 		}
 		log.Infof("Wrote %d bytes of %s to the end of %s\n", n, *item.Key, newFileName)
 
-		// Delete the old input file
+		// Delete session file
 		pieceFile.Close()
 		if err := os.Remove(*item.Key); err != nil {
 			log.Errorf("Failed to remove piece file %s: %v", *item.Key, err)
@@ -376,6 +395,7 @@ func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
 	return nil
 }
 
+// PRINT FILTERED FILE ON CONSOLE
 func PrintFilteredFile(file string) {
 	fmt.Println("\nFiltered conversation:")
 	lines := strings.Split(file, "///")

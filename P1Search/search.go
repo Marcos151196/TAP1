@@ -6,10 +6,8 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 
 	aws "github.com/aws/aws-sdk-go/aws"
 	session "github.com/aws/aws-sdk-go/aws/session"
@@ -26,125 +24,55 @@ var cfgFile string = "config/config.toml"
 var sess *session.Session = session.Must(session.NewSessionWithOptions(session.Options{
 	SharedConfigState: session.SharedConfigEnable,
 }))
-var svc *sqs.SQS = sqs.New(sess)
-var msgReceived = make(chan *sqs.Message, 1)
-var msgProcessed = make(chan bool, 1)
+var sqssvc *sqs.SQS = sqs.New(sess)
+var s3svc *s3.S3 = s3.New(sess)
 
 func main() {
-	initConfig()
-	keyboardInterr := make(chan os.Signal, 1)
-	signal.Notify(keyboardInterr, os.Interrupt, syscall.SIGTERM)
+	initConfig() // Set config file, logs and queues URLs
 
-	// RECEIVE MSGS
-	go func() {
-		for {
-			RXmsg := &sqs.ReceiveMessageInput{
-				MessageAttributeNames: aws.StringSlice([]string{"clientName", "timestamp", "sessionID", "cmd"}),
-				QueueUrl:              &inboxURL,
-				MaxNumberOfMessages:   aws.Int64(1),
-				WaitTimeSeconds:       aws.Int64(1),
-			}
-
-			// READ MSG
-			resultRX, err := svc.ReceiveMessage(RXmsg)
-			if err != nil {
-				log.Errorf("Error while receiving message: %v", err)
-				continue
-			}
-
-			if len(resultRX.Messages) == 0 {
-				continue
-			}
-
-			msgReceived <- resultRX.Messages[0]
-			<-msgProcessed
-
-			// DELETE MSG
-			_, err = svc.DeleteMessage(&sqs.DeleteMessageInput{
-				QueueUrl:      &inboxURL,
-				ReceiptHandle: resultRX.Messages[0].ReceiptHandle,
-			})
-
-			if err != nil {
-				log.Errorf("Error when trying to delete message after processing: %v", err)
-				continue
-			}
-
+	// MAIN LOOP (RECEIVE, PROCESS AND DELETE IF PROCESSED, IF NOT GO BACK TO RECEIVE)
+	for {
+		RXmsg := &sqs.ReceiveMessageInput{
+			MessageAttributeNames: aws.StringSlice([]string{"clientName", "timestamp", "sessionID", "cmd"}),
+			QueueUrl:              &inboxURL,
+			MaxNumberOfMessages:   aws.Int64(1),
+			WaitTimeSeconds:       aws.Int64(1),
 		}
-	}()
 
-	// PROCESS MSG
-	go func() {
-		for {
-			msg := <-msgReceived
-			cmd := *msg.MessageAttributes["cmd"].StringValue
-			sessID := *msg.MessageAttributes["sessionID"].StringValue
-			clientName := *msg.MessageAttributes["clientName"].StringValue
-			timestamp := *msg.MessageAttributes["timestamp"].StringValue
-			log.Infof("New message received. Client: %s\tCommand: %s", clientName, cmd)
-			cRX, _ := strconv.Atoi(cmd)
-			// ECHO
-			if cRX == 2 {
-				text := *msg.Body
-
-				err := DownloadConversation(clientName)
-				if err != nil {
-					log.Errorf("Could not download conversation %v", err)
-				}
-				filtFileName, err := CreateFilteredConversationFile(clientName, text)
-				if err != nil {
-					log.Errorf("Could not filter file: %v", err)
-				}
-
-				filtFile, err := ioutil.ReadFile(filtFileName)
-				if err != nil {
-					log.Errorf("Could not read filtered file before sending it to SQS: %v", err)
-					break
-				}
-				filtFileStr := string(filtFile)
-
-				msgTX := &sqs.SendMessageInput{
-					MessageAttributes: map[string]*sqs.MessageAttributeValue{
-						"clientName": &sqs.MessageAttributeValue{
-							DataType:    aws.String("String"),
-							StringValue: aws.String(clientName),
-						},
-						"sessionID": &sqs.MessageAttributeValue{
-							DataType:    aws.String("String"),
-							StringValue: aws.String(sessID),
-						},
-						"timestamp": &sqs.MessageAttributeValue{
-							DataType:    aws.String("String"),
-							StringValue: aws.String(timestamp),
-						},
-						"cmd": &sqs.MessageAttributeValue{
-							DataType:    aws.String("String"),
-							StringValue: aws.String(cmd),
-						},
-					},
-					MessageBody: aws.String(filtFileStr),
-					QueueUrl:    &outboxURL,
-				}
-				DeleteTemporalConversation(clientName + "_filtered")
-				log.Infof("Sending filtered conversation to %s", clientName)
-				result, err := svc.SendMessage(msgTX)
-				if err != nil {
-					log.Errorf("Could not send message to SQS queue: %v", err)
-				} else {
-					log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
-					newFileName := viper.GetString("s3.conversationspath") + "/" + clientName + ".txt"
-					os.Remove(newFileName)
-				}
-
-				msgProcessed <- true
-
-			}
+		// READ MSG
+		resultRX, err := sqssvc.ReceiveMessage(RXmsg)
+		if err != nil {
+			log.Errorf("Error while receiving message: %v", err)
+			continue
 		}
-	}()
-	<-keyboardInterr
+
+		if len(resultRX.Messages) == 0 {
+			continue
+		}
+
+		// Process message
+		err = ProcessRXMessage(resultRX.Messages[0])
+		if err != nil {
+			log.Errorf("Could not process message: %v", err)
+			continue
+		}
+
+		// Delete message after processing it
+		_, err = sqssvc.DeleteMessage(&sqs.DeleteMessageInput{
+			QueueUrl:      &inboxURL,
+			ReceiptHandle: resultRX.Messages[0].ReceiptHandle,
+		})
+
+		if err != nil {
+			log.Errorf("Error when trying to delete message after processing: %v", err)
+			continue
+		}
+
+	}
 
 }
 
+// SETS CONFIG FILE, LOGS ETC
 func initConfig() {
 	// CONFIG FILE
 	viper.SetConfigFile(cfgFile)
@@ -201,16 +129,86 @@ func initConfig() {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
 
-	// START SQS INBOX AND OUTBOX QUEUES
+	// GET SQS INBOX AND OUTBOX QUEUES URL
 	inboxURL = viper.GetString("sqs.inboxURL")
 	outboxURL = viper.GetString("sqs.outboxURL")
 
 	return
 }
 
+// CHECK IF MSG IS FOR SEARCH APP, DOWNLOAD ALL SESSIONS FOR THAT CLIENT, FILTER THEM USING THE KEY SENTENCE
+// AND COMBINE THEM IN ONE FILE BEFORE SENDING IT TO THE CLIENT THROUGH OUTBOX QUEUE. REMOVES ALL TEMPORAL FILES AFTER SENDING TO SQS.
+// RETURNS ERROR IF THE MESSAGE WAS NOT FOR THE SEARCH APP OR SOMETHING WENT WRONG
+func ProcessRXMessage(msg *sqs.Message) error {
+	cmd := *msg.MessageAttributes["cmd"].StringValue
+	sessID := *msg.MessageAttributes["sessionID"].StringValue
+	clientName := *msg.MessageAttributes["clientName"].StringValue
+	timestamp := *msg.MessageAttributes["timestamp"].StringValue
+	log.Infof("New message received. Client: %s\tCommand: %s", clientName, cmd)
+	cRX, _ := strconv.Atoi(cmd)
+	// SEARCH
+	if cRX == 2 {
+		text := *msg.Body
+		err := DownloadConversation(clientName)
+		if err != nil {
+			return fmt.Errorf("Could not download conversation %v", err)
+		}
+		filtFileName, err := CreateFilteredConversationFile(clientName, text)
+		if err != nil {
+			return fmt.Errorf("Could not filter file: %v", err)
+		}
+
+		filtFile, err := ioutil.ReadFile(filtFileName)
+		if err != nil {
+			return fmt.Errorf("Could not read filtered file before sending it to SQS: %v", err)
+		}
+		filtFileStr := string(filtFile)
+		if filtFileStr == "" {
+			filtFileStr = "EMPTY CONVERSATION"
+		}
+
+		msgTX := &sqs.SendMessageInput{
+			MessageAttributes: map[string]*sqs.MessageAttributeValue{
+				"clientName": &sqs.MessageAttributeValue{
+					DataType:    aws.String("String"),
+					StringValue: aws.String(clientName),
+				},
+				"sessionID": &sqs.MessageAttributeValue{
+					DataType:    aws.String("String"),
+					StringValue: aws.String(sessID),
+				},
+				"timestamp": &sqs.MessageAttributeValue{
+					DataType:    aws.String("String"),
+					StringValue: aws.String(timestamp),
+				},
+				"cmd": &sqs.MessageAttributeValue{
+					DataType:    aws.String("String"),
+					StringValue: aws.String(cmd),
+				},
+			},
+			MessageBody: aws.String(filtFileStr),
+			QueueUrl:    &outboxURL,
+		}
+		DeleteTemporalConversation(clientName + "_filtered")
+		log.Infof("Sending filtered conversation to %s", clientName)
+		result, err := sqssvc.SendMessage(msgTX)
+		if err != nil {
+			log.Errorf("Could not send message to SQS queue: %v", err)
+		} else {
+			log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
+			newFileName := viper.GetString("s3.conversationspath") + "/" + clientName + ".txt"
+			os.Remove(newFileName)
+		}
+	} else {
+		return fmt.Errorf("This message was not for the search app.")
+	}
+	return nil
+}
+
+// DOWNLOAD FILE FROM S3 AND STORE IT IN LOCAL FOLDER conversations
 func DownloadConversation(client string) error {
-	s3svc := s3.New(sess)
 	bucketname := viper.GetString("s3.bucketname")
+	// List all sessions for the client stored in S3
 	resp, err := s3svc.ListObjectsV2(&s3.ListObjectsV2Input{Bucket: aws.String(bucketname), Prefix: aws.String(viper.GetString("s3.conversationspath") + "/" + client)})
 	if err != nil {
 		return fmt.Errorf("Unable to list items in bucket %q, %v", bucketname, err)
@@ -218,13 +216,14 @@ func DownloadConversation(client string) error {
 
 	// Create a downloader with the session and default options
 	downloader := s3manager.NewDownloader(sess)
+	// Iterate over the session list for the client and download them to local path conversations
 	for _, item := range resp.Contents {
 		downloadPath := *item.Key
-		// txtname := filepath.Base(downloadPath)
 		// Create a file to write the S3 Object contents to.
 		f, err := os.OpenFile(downloadPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 		if err != nil {
-			return fmt.Errorf("Failed to create file %q, %v", downloadPath, err)
+			log.Errorf("Failed to create file %q, %v", downloadPath, err)
+			continue
 		}
 
 		// Write the contents of S3 Object to the file
@@ -234,15 +233,21 @@ func DownloadConversation(client string) error {
 		})
 		f.Close()
 		if err != nil {
-			return fmt.Errorf("failed to download file, %v", err)
+			os.Remove(downloadPath)
+			log.Errorf("Failed to download file %s, %v", downloadPath, err)
 		}
 	}
 
-	CombineSessionsToFile(client, resp)
+	// Combine all sessions in one file and remove them
+	err = CombineSessionsToFile(client, resp)
+	if err != nil {
+		return fmt.Errorf("Could not combine sessions to file: %v", err)
+	}
 	log.Infof("Whole conversation of client %s has been downloaded.", client)
 	return nil
 }
 
+// COMBINES ALL LOCAL (ALREADY DOWNLOADED) SESSIONS FOR A CLIENT IN ONE FILE AND DELETES THEM WHEN DONE, LEAVING ONLY THE COMBINED FILE
 func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
 	newFileName := viper.GetString("s3.conversationspath") + "/" + client + ".txt"
 	os.Remove(newFileName)
@@ -274,6 +279,7 @@ func CombineSessionsToFile(client string, items *s3.ListObjectsV2Output) error {
 	return nil
 }
 
+// DELETES A TEMPORAL FILE FROM LOCAL PATH conversations
 func DeleteTemporalConversation(client string) error {
 	err := os.Remove(fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client))
 
@@ -284,11 +290,14 @@ func DeleteTemporalConversation(client string) error {
 	return nil
 }
 
+// READS THE CLIENT COMBINED FILE LINE BY LINE AND APPENDS EVERY LINE CONTAINING sentence TO ANOTHER ONE AND REMOVES THE COMBINED ONE WHEN DONE
 func CreateFilteredConversationFile(client string, sentence string) (string, error) {
 	mainFileName := viper.GetString("s3.conversationspath") + "/" + client + ".txt"
 	mainFile, err := os.Open(mainFileName)
 	if err != nil {
-		log.Warnf("Failed to open main file %s for filtering: %v", mainFileName, err)
+		mainFile.Close()
+		os.Remove(mainFileName)
+		return "", fmt.Errorf("Failed to open main file %s for filtering: %v", mainFileName, err)
 	}
 	defer mainFile.Close()
 
@@ -296,6 +305,8 @@ func CreateFilteredConversationFile(client string, sentence string) (string, err
 	filtFile, err := os.OpenFile(filtFileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	defer filtFile.Close()
 	if err != nil {
+		filtFile.Close()
+		os.Remove(mainFileName)
 		return "", fmt.Errorf("Failed to create file %q: %v", filtFileName, err)
 	}
 
@@ -312,6 +323,8 @@ func CreateFilteredConversationFile(client string, sentence string) (string, err
 
 	mainFile.Close()
 	filtFile.Close()
+
+	os.Remove(mainFileName)
 
 	return filtFileName, nil
 }

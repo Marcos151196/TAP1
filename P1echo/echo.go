@@ -5,15 +5,13 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 
 	aws "github.com/aws/aws-sdk-go/aws"
 	session "github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	s3 "github.com/aws/aws-sdk-go/service/s3"
+	s3manager "github.com/aws/aws-sdk-go/service/s3/s3manager"
 	sqs "github.com/aws/aws-sdk-go/service/sqs"
 	log "github.com/sirupsen/logrus"
 	viper "github.com/theherk/viper"
@@ -25,115 +23,49 @@ var cfgFile string = "config/config.toml"
 var sess *session.Session = session.Must(session.NewSessionWithOptions(session.Options{
 	SharedConfigState: session.SharedConfigEnable,
 }))
-var svc *sqs.SQS = sqs.New(sess)
-var msgReceived = make(chan *sqs.Message, 1)
-var msgProcessed = make(chan bool, 1)
+var sqssvc *sqs.SQS = sqs.New(sess)
 
 func main() {
-	initConfig()
-	keyboardInterr := make(chan os.Signal, 1)
-	signal.Notify(keyboardInterr, os.Interrupt, syscall.SIGTERM)
+	initConfig() // Set config file, logs and queues URLs
 
-	// RECEIVE MSGS
-	go func() {
-		for {
-			RXmsg := &sqs.ReceiveMessageInput{
-				MessageAttributeNames: aws.StringSlice([]string{"clientName", "timestamp", "sessionID", "cmd"}),
-				QueueUrl:              &inboxURL,
-				MaxNumberOfMessages:   aws.Int64(1),
-				WaitTimeSeconds:       aws.Int64(1),
-			}
-
-			// READ MSG
-			resultRX, err := svc.ReceiveMessage(RXmsg)
-			if err != nil {
-				log.Errorf("Error while receiving message: %v", err)
-				continue
-			}
-
-			if len(resultRX.Messages) == 0 {
-				continue
-			}
-
-			msgReceived <- resultRX.Messages[0]
-			<-msgProcessed
-
-			// DELETE MSG
-			_, err = svc.DeleteMessage(&sqs.DeleteMessageInput{
-				QueueUrl:      &inboxURL,
-				ReceiptHandle: resultRX.Messages[0].ReceiptHandle,
-			})
-
-			if err != nil {
-				log.Errorf("Error when trying to delete message after processing: %v", err)
-				continue
-			}
-
+	// MAIN LOOP (RECEIVE, PROCESS AND DELETE IF PROCESSED, IF NOT GO BACK TO RECEIVE)
+	for {
+		RXmsg := &sqs.ReceiveMessageInput{
+			MessageAttributeNames: aws.StringSlice([]string{"clientName", "timestamp", "sessionID", "cmd"}),
+			QueueUrl:              &inboxURL,
+			MaxNumberOfMessages:   aws.Int64(1),
+			WaitTimeSeconds:       aws.Int64(1),
 		}
-	}()
 
-	// PROCESS MSG
-	go func() {
-		for {
-			msg := <-msgReceived
-			cmd := *msg.MessageAttributes["cmd"].StringValue
-			sessID := *msg.MessageAttributes["sessionID"].StringValue
-			clientName := *msg.MessageAttributes["clientName"].StringValue
-			timestamp := *msg.MessageAttributes["timestamp"].StringValue
-			log.Infof("New message received. Client: %s\tCommand: %s", clientName, cmd)
-			cRX, _ := strconv.Atoi(cmd)
-			// ECHO
-			if cRX == 1 {
-				text := *msg.Body
-				if text == "END" {
-					log.Infof("End of conversation with %s", clientName)
-					msgProcessed <- true
-				} else {
-					msgTX := &sqs.SendMessageInput{
-						MessageAttributes: map[string]*sqs.MessageAttributeValue{
-							"clientName": &sqs.MessageAttributeValue{
-								DataType:    aws.String("String"),
-								StringValue: aws.String(clientName),
-							},
-							"sessionID": &sqs.MessageAttributeValue{
-								DataType:    aws.String("String"),
-								StringValue: aws.String(sessID),
-							},
-							"timestamp": &sqs.MessageAttributeValue{
-								DataType:    aws.String("String"),
-								StringValue: aws.String(timestamp),
-							},
-							"cmd": &sqs.MessageAttributeValue{
-								DataType:    aws.String("String"),
-								StringValue: aws.String(cmd),
-							},
-						},
-						MessageBody: aws.String(text),
-						QueueUrl:    &outboxURL,
-					}
-					err := StoreNewLine(clientName, sessID, text, timestamp)
-					if err != nil {
-						log.Errorf("Could not upload conversation to S3: %v", err)
-					}
-					DeleteTemporalConversation(clientName + "_" + sessID)
-					log.Infof("Echoing message. Client: %s\tContent: %s", clientName, text)
-					result, err := svc.SendMessage(msgTX)
-					if err != nil {
-						log.Errorf("Could not send message to SQS queue: %v", err)
-					} else {
-						log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
-					}
-					msgProcessed <- true
-				}
-			} else if cRX == 2 { // SEARCH
-
-			}
+		resultRX, err := sqssvc.ReceiveMessage(RXmsg)
+		if err != nil {
+			log.Errorf("Error while receiving message: %v", err)
+			continue
 		}
-	}()
-	<-keyboardInterr
+
+		if len(resultRX.Messages) == 0 {
+			continue
+		}
+
+		err = ProcessRXMessage(resultRX.Messages[0])
+		if err != nil {
+			continue
+		}
+
+		// Delete message after processing it
+		_, err = sqssvc.DeleteMessage(&sqs.DeleteMessageInput{
+			QueueUrl:      &inboxURL,
+			ReceiptHandle: resultRX.Messages[0].ReceiptHandle,
+		})
+
+		if err != nil {
+			log.Errorf("Error when trying to delete message after processing: %v", err)
+		}
+	}
 
 }
 
+// SETS CONFIG FILE, LOGS ETC
 func initConfig() {
 	// CONFIG FILE
 	viper.SetConfigFile(cfgFile)
@@ -190,15 +122,71 @@ func initConfig() {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
 
-	// START SQS INBOX AND OUTBOX QUEUES
+	// GET SQS INBOX AND OUTBOX QUEUES URL
 	inboxURL = viper.GetString("sqs.inboxURL")
 	outboxURL = viper.GetString("sqs.outboxURL")
 
 	return
 }
 
-func DownloadConversation(client string) error {
+// CHECK IF MSG IS FOR ECHO APP, CHECK THAT IT'S NOT END, STORE IT IN S3 AND SEND IT BACK THROUGH OUTBOX QUEUE
+// RETURNS ERROR IF THE MESSAGE WAS NOT FOR THE ECHO APP
+func ProcessRXMessage(msg *sqs.Message) error {
+	cmd := *msg.MessageAttributes["cmd"].StringValue
+	sessID := *msg.MessageAttributes["sessionID"].StringValue
+	clientName := *msg.MessageAttributes["clientName"].StringValue
+	timestamp := *msg.MessageAttributes["timestamp"].StringValue
+	log.Infof("New message received. Client: %s\tCommand: %s", clientName, cmd)
+	cRX, _ := strconv.Atoi(cmd)
+	if cRX == 1 {
+		text := *msg.Body
+		if text == "END" {
+			log.Infof("End of conversation with %s", clientName)
+			return nil
+		} else {
+			msgTX := &sqs.SendMessageInput{
+				MessageAttributes: map[string]*sqs.MessageAttributeValue{
+					"clientName": &sqs.MessageAttributeValue{
+						DataType:    aws.String("String"),
+						StringValue: aws.String(clientName),
+					},
+					"sessionID": &sqs.MessageAttributeValue{
+						DataType:    aws.String("String"),
+						StringValue: aws.String(sessID),
+					},
+					"timestamp": &sqs.MessageAttributeValue{
+						DataType:    aws.String("String"),
+						StringValue: aws.String(timestamp),
+					},
+					"cmd": &sqs.MessageAttributeValue{
+						DataType:    aws.String("String"),
+						StringValue: aws.String(cmd),
+					},
+				},
+				MessageBody: aws.String(text),
+				QueueUrl:    &outboxURL,
+			}
+			err := StoreNewLine(clientName, sessID, text, timestamp)
+			if err != nil {
+				log.Errorf("Could not upload conversation to S3: %v", err)
+			}
+			DeleteTemporalConversation(clientName + "_" + sessID)
+			log.Infof("Echoing message. Client: %s\tContent: %s", clientName, text)
+			result, err := sqssvc.SendMessage(msgTX)
+			if err != nil {
+				log.Errorf("Could not send message to SQS queue: %v", err)
+			} else {
+				log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
+			}
+		}
+	} else {
+		return fmt.Errorf("This message was not for the echo app.")
+	}
+	return nil
+}
 
+// DOWNLOAD FILE FROM S3 AND STORE IT IN LOCAL FOLDER tmpConv
+func DownloadConversation(client string) error {
 	// Create a downloader with the session and default options
 	downloader := s3manager.NewDownloader(sess)
 	filename := fmt.Sprintf("tmpConv/%s.txt", client)
@@ -221,6 +209,7 @@ func DownloadConversation(client string) error {
 	return nil
 }
 
+// DOWNLOAD [CLIENT]_[SESSION_ID].txt FILE FROM S3, APPEND NEW LINE AND UPLOAD IT AGAIN TO S3
 func StoreNewLine(client string, sessID string, body string, timestamp string) error {
 	err := DownloadConversation(client + "_" + sessID)
 	if err != nil {
@@ -257,6 +246,7 @@ func StoreNewLine(client string, sessID string, body string, timestamp string) e
 	return nil
 }
 
+// DELETE MESSAGE FROM SQS QUEUE AFTER PROCESSING IT
 func DeleteTemporalConversation(client string) error {
 	err := os.Remove(fmt.Sprintf("tmpConv/%s.txt", client))
 
@@ -267,11 +257,9 @@ func DeleteTemporalConversation(client string) error {
 	return nil
 }
 
-// UploadFileToS3 saves a file to aws bucket and returns the url to the file and an error if there's any
+// UPLOAD FILE TO S3. BUCKET AND PATH ARE SPECIFIEND IN THE CONFIG FILE
 func UploadFileToS3(client string, f *os.File, sessID string) error {
-
 	uploadPath := fmt.Sprintf("%s/%s.txt", viper.GetString("s3.conversationspath"), client+"_"+sessID)
-	// Upload the file to S3.
 	uploader := s3manager.NewUploader(sess)
 	_, err := uploader.Upload(&s3manager.UploadInput{
 		Bucket: aws.String(viper.GetString("s3.bucketname")),
