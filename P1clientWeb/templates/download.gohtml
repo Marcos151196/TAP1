@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
+        <title>Download</title>
+    </head>
+
+    <body style="background-color:LightSlateGray;margin:2%">
+        <div class="container">                 
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h2 class="card-title">Download conversation</h2>
+                    <form method="POST" action="/download">
+                        <div class="form-group">
+                            <label>Write the name of the user:</label><br />
+                            <input type="text" name="downloaduser" autofocus required><br />
+                        </div>
+                        <div class="form-group">
+                            <button type="submit" class="btn btn-outline-primary">Download</button>
+                        </div>
+                    </form>
+                    <button class="btn btn-outline-danger" onclick="window.location.href='menu'">Return to menu</button> 
+                </div>
+            </div>
+        </div>
+    </body>
+
+    {{if (ne .DownloadUser "")}}
+        <script>
+            function download(filename, text) {
+                var element = document.createElement('a');
+                element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+                element.setAttribute('download', filename);
+
+                element.style.display = 'none';
+                document.body.appendChild(element);
+
+                element.click();
+
+                document.body.removeChild(element);
+            }
+
+
+            var text = {{.DownloadFile}}
+            var user = {{.DownloadUser}}
+            var filename = user.concat('.txt')
+            
+            download(filename, text);
+        </script>
+    {{end}}
+    
+</html>

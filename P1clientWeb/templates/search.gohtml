@@ -1,24 +1,46 @@
 <!DOCTYPE html>
 <html>
-
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Hello Bulma!</title>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.7.5/css/bulma.min.css">
-        <script defer src="https://use.fontawesome.com/releases/v5.3.1/js/all.js"></script>
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
+        <title>Search</title>
     </head>
 
-    <h1>SEARCH APP</h1>
-        <form method="POST" action="/search">
-            <label>Client name:</label><br />
-            <input type="text" name="clientsearch"><br />
-            <label>Sentence to search:</label><br />
-            <input type="text" name="keysentence"><br />
-            <input type="submit">
-        </form>
+    <body style="background-color:LightSlateGray;margin:2%">
 
-        <span style="white-space:pre-wrap;"> {{ .SearchData.SearchResult }} </span> 
+        <div class="container">                 
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h2 class="card-title">Filter conversation</h2>
+                    <form method="POST" action="/search">
+                        <div class="form-group">
+                            <label>Client name:</label><br />
+                            <input type="text" name="clientsearch" required><br />
+                        </div>
+                        <div class="form-group">
+                            <label>Sentence to search:</label><br />
+                            <input type="text" name="keysentence" required><br />
+                        </div>
+                        <div class="form-group">
+                            <button type="submit" class="btn btn-outline-primary">Search message</button>
+                        </div>
+                    </form>
+                    <button class="btn btn-outline-danger" onclick="window.location.href='menu'">Return to menu</button>                    
+                </div>
+            </div>  
+            <br />
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h2 class="card-title">Filtered conversation</h2>
+                    <span style="white-space:pre;"> {{ .SearchData.SearchResult }} </span> 
+                </div>
+            </div>  
+        </div>
+    </body>
         
 
 </html>

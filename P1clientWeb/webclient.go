@@ -32,6 +32,8 @@ type ClientStruct struct {
 	Cmd              int
 	EchoConversation string
 	SearchData       SearchStruct
+	DownloadUser     string
+	DownloadFile     string
 }
 
 var clientSearch, keysentence string
@@ -62,15 +64,17 @@ func main() {
 
 	tpl = template.Must(template.ParseGlob("templates/*.gohtml"))
 
-	http.HandleFunc("/", menu)
+	http.HandleFunc("/menu", menu)
 	http.HandleFunc("/echo", echo)
 	http.HandleFunc("/search", search)
+	http.HandleFunc("/download", download)
 
 	http.ListenAndServe(":8080", nil)
 }
 
 func menu(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
+	ClientData = *new(ClientStruct)
 
 	if r.Method == http.MethodPost {
 		ClientData.Client = r.FormValue("client")
@@ -86,7 +90,10 @@ func menu(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 		} else if ClientData.Cmd == 3 { // DOWNLOAD
-
+			err := tpl.ExecuteTemplate(w, "download.gohtml", ClientData)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		} else {
 
 		}
@@ -144,10 +151,10 @@ func echo(w http.ResponseWriter, r *http.Request) {
 				return
 			} else {
 				echomsg = <-ReceivedEcho
+				ClientData.EchoConversation = ClientData.EchoConversation + ClientData.Client + ":\t" + text + "\nEcho:\t" + echomsg + "\n\n"
 			}
 		}
 
-		ClientData.EchoConversation = ClientData.EchoConversation + ClientData.Client + ":\t" + text + "\nEcho:\t" + echomsg + "\n\n"
 	}
 
 	err := tpl.ExecuteTemplate(w, "echo.gohtml", ClientData)
@@ -199,6 +206,29 @@ func search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := tpl.ExecuteTemplate(w, "search.gohtml", ClientData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func download(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	if r.Method == http.MethodPost {
+		ClientData.DownloadUser = r.FormValue("downloaduser")
+		err := DownloadConversation(ClientData.DownloadUser)
+		if err != nil {
+			log.Errorf("Could not download conversation %v", err)
+		}
+
+		b, err := ioutil.ReadFile("conversations/" + ClientData.DownloadUser + ".txt")
+		if err != nil {
+			log.Errorf("Could not read whole conversation file to string variable: %v", err)
+		}
+		ClientData.DownloadFile = string(b)
+		os.Remove("conversations/" + ClientData.DownloadUser + ".txt")
+	}
+
+	err := tpl.ExecuteTemplate(w, "download.gohtml", ClientData)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -421,7 +451,7 @@ func PrintFilteredFile(file string) string {
 	for _, line := range lines {
 		if line != "" {
 			columns := strings.Split(line, "|||")
-			fileString = fmt.Sprintf("%s%s\t%s\n", fileString, columns[0], columns[1])
+			fileString = fmt.Sprintf("%s%s    %s\n", fileString, columns[0], columns[1])
 		}
 	}
 	fileString = fmt.Sprintf("%s\n", fileString)

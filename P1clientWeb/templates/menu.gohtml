@@ -4,22 +4,37 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Hello Bulma!</title>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.7.5/css/bulma.min.css">
-        <script defer src="https://use.fontawesome.com/releases/v5.3.1/js/all.js"></script>
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
+        <title>Menu</title>
     </head>
 
-    <h1>MAIN MENU</h1>
-    <form method="POST" action="/">
-        <label>Client name:</label><br />
-        <input type="text" name="client"><br />
-        <label>Select the command:</label><br />
-        <select name="cmd">
-            <option value="1">ECHO</option>
-            <option value="2">SEARCH</option>
-            <option value="3">DOWNLOAD</option>
-        </select>
-        <input type="submit">
-    </form>
+    <body style="background-color:LightSlateGray;margin:2%">
+        <div class="container">        
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h2 class="card-title">Main menu</h2>
+                    <form method="POST" action="/menu">                                
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" class="form-control" name="client" value="Marcos" placeholder="Enter your username (Default: Marcos)" autofocus required>
+                        </div>
+                        <div class="form-group">
+                            <label>Command</label>
+                            <select class="browser-default custom-select" name="cmd">
+                                <option value="1">Echo</option>
+                                <option value="2">Search</option>
+                                <option value="3">Download</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-outline-primary">Select</button>
+                    </form>
+                </div>
+            </div>  
+        </div>
+    </body>
+
 
     </html>
