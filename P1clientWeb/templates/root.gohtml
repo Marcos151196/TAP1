@@ -8,25 +8,19 @@
         <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
         <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
-        <title>Menu</title>
+        <title>Username</title>
     </head>
 
     <body style="background-color:LightSlateGray;margin:2%">
         <div class="container">        
             <div class="card bg-light">
                 <div class="card-body">
-                    <h2 class="card-title">Main menu</h2>
-                    <form method="POST" action="/menu">
+                    <h2 class="card-title">Client name</h2>
+                    <form method="POST" action="/">                                
                         <div class="form-group">
-                            <label>Command</label>
-                            <select class="browser-default custom-select" name="cmd">
-                                <option value="1">Echo</option>
-                                <option value="2">Search</option>
-                                <option value="3">Download</option>
-                            </select>
+                            <label>Username</label>
+                            <input type="text" class="form-control" name="client" value="Marcos" placeholder="Enter your username (Default: Marcos)" autofocus required>
                         </div>
-                        <input type="hidden" name="client" value="{{.Client}}">
-                        <input type="hidden" name="sessid" value="{{.SessID}}">
                         <button type="submit" class="btn btn-outline-primary">Select</button>
                     </form>
                 </div>

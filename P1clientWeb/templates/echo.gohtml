@@ -33,15 +33,26 @@
                             <label>Send a message:</label><br />
                             <input type="text" name="msgsent" autofocus required><br />
                         </div>
+                        <input type="hidden" name="client" value="{{.Client}}">
+                        <input type="hidden" name="cmd" value="{{.Cmd}}">
+                        <input type="hidden" name="echoconversation" value="{{.EchoConversation}}">
+                        <input type="hidden" name="sessid" value="{{.SessID}}">
                         <div class="form-group">
                             <button type="submit" class="btn btn-outline-primary">Send</button>
                         </div>
-                    </form>
-                    <button class="btn btn-outline-danger" onclick="window.location.href='menu'">Return to menu</button>
-                    </div>
-                </div>  
-            </div>
-        </body>
+                    </form> 
+                    <form method="GET" action="/menu">
+                        <input type="hidden" name="client" value="{{.Client}}">
+                        <input type="hidden" name="cmd" value="0">
+                        <input type="hidden" name="sessid" value="{{.SessID}}">
+                        <div class="form-group">
+                            <button type="submit" class="btn btn-outline-danger">Return to menu</button>
+                        </div>
+                    </form>                    
+                </div>
+            </div>  
+        </div>
+    </body>
 
     
 </html>

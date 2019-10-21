@@ -27,6 +27,12 @@ type SearchStruct struct {
 	SearchResult string
 }
 
+type RXMsgStruct struct {
+	RXMSG  *sqs.ReceiveMessageOutput
+	Body   string
+	SessID string
+}
+
 type ClientStruct struct {
 	Client           string
 	Cmd              int
@@ -34,23 +40,22 @@ type ClientStruct struct {
 	SearchData       SearchStruct
 	DownloadUser     string
 	DownloadFile     string
+	SessID           string
 }
 
 var clientSearch, keysentence string
 var tpl *template.Template
 
 var SearchData SearchStruct
-var ClientData ClientStruct
 
-var ReceivedEcho = make(chan string, 1)
-var SearchDone = make(chan string, 1)
+var ReceivedEcho = make(chan RXMsgStruct, 1)
+var SearchDone = make(chan RXMsgStruct, 1)
 
 var clientName, logFile, verboseLevel, inboxURL, outboxURL string
 var stdoutEnabled, fileoutEnabled bool
 var cfgFile string = "config/config.toml"
 var command int
 var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-var sessID string
 var sess *session.Session = session.Must(session.NewSessionWithOptions(session.Options{
 	SharedConfigState: session.SharedConfigEnable,
 }))
@@ -58,12 +63,12 @@ var sqssvc *sqs.SQS = sqs.New(sess)
 
 func main() {
 	initConfig()
-	sessID = StringWithCharset(6)
 
 	go ReceiveMSGS()
 
 	tpl = template.Must(template.ParseGlob("templates/*.gohtml"))
 
+	http.HandleFunc("/", root)
 	http.HandleFunc("/menu", menu)
 	http.HandleFunc("/echo", echo)
 	http.HandleFunc("/search", search)
@@ -72,12 +77,33 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-func menu(w http.ResponseWriter, r *http.Request) {
+func root(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
-	ClientData = *new(ClientStruct)
+	ClientData := *new(ClientStruct)
+	ClientData.SessID = StringWithCharset(6)
 
 	if r.Method == http.MethodPost {
 		ClientData.Client = r.FormValue("client")
+		err := tpl.ExecuteTemplate(w, "menu.gohtml", ClientData)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	} else {
+		err := tpl.ExecuteTemplate(w, "root.gohtml", ClientData)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+
+}
+
+func menu(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	ClientData := ClientStruct{
+		Client: r.FormValue("client"),
+		SessID: r.FormValue("sessid"),
+	}
+	if r.Method == http.MethodPost {
 		ClientData.Cmd, _ = strconv.Atoi(r.FormValue("cmd"))
 		if ClientData.Cmd == 1 { //ECHO
 			err := tpl.ExecuteTemplate(w, "echo.gohtml", ClientData)
@@ -95,10 +121,13 @@ func menu(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 		} else {
-
+			err := tpl.ExecuteTemplate(w, "menu.gohtml", ClientData)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}
 	} else {
-		err := tpl.ExecuteTemplate(w, "menu.gohtml", nil)
+		err := tpl.ExecuteTemplate(w, "menu.gohtml", ClientData)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -107,7 +136,14 @@ func menu(w http.ResponseWriter, r *http.Request) {
 }
 
 func echo(w http.ResponseWriter, r *http.Request) {
-	var echomsg string
+	var echomsg RXMsgStruct
+	cmdint, _ := strconv.Atoi(r.FormValue("cmd"))
+	ClientData := ClientStruct{
+		Client:           r.FormValue("client"),
+		Cmd:              cmdint,
+		SessID:           r.FormValue("sessid"),
+		EchoConversation: r.FormValue("echoconversation"),
+	}
 	w.Header().Set("Content-Type", "text/html")
 	if r.Method == http.MethodPost {
 		timestamp := time.Now().Format("02-Jan-2006 15:04:05")
@@ -121,7 +157,7 @@ func echo(w http.ResponseWriter, r *http.Request) {
 				},
 				"sessionID": &sqs.MessageAttributeValue{
 					DataType:    aws.String("String"),
-					StringValue: aws.String(sessID),
+					StringValue: aws.String(ClientData.SessID),
 				},
 				"timestamp": &sqs.MessageAttributeValue{
 					DataType:    aws.String("String"),
@@ -143,15 +179,30 @@ func echo(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
 			if text == "END" {
-				ClientData = *new(ClientStruct)
 				err := tpl.ExecuteTemplate(w, "menu.gohtml", nil)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 				}
 				return
 			} else {
-				echomsg = <-ReceivedEcho
-				ClientData.EchoConversation = ClientData.EchoConversation + ClientData.Client + ":\t" + text + "\nEcho:\t" + echomsg + "\n\n"
+				for {
+					echomsg = <-ReceivedEcho
+					if ClientData.SessID != echomsg.SessID {
+						sqssvc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+							QueueUrl:          &outboxURL,
+							ReceiptHandle:     echomsg.RXMSG.Messages[0].ReceiptHandle,
+							VisibilityTimeout: aws.Int64(0),
+						})
+						continue
+					} else {
+						ClientData.EchoConversation = ClientData.EchoConversation + ClientData.Client + ":\t" + text + "\nEcho:\t" + echomsg.Body + "\n\n"
+						err = DeleteMSGSQS(echomsg.RXMSG)
+						if err != nil {
+							log.Errorf("Could not delete msg after processing: %v", err)
+						}
+						break
+					}
+				}
 			}
 		}
 
@@ -164,6 +215,12 @@ func echo(w http.ResponseWriter, r *http.Request) {
 }
 
 func search(w http.ResponseWriter, r *http.Request) {
+	cmdint, _ := strconv.Atoi(r.FormValue("cmd"))
+	ClientData := ClientStruct{
+		Client: r.FormValue("client"),
+		Cmd:    cmdint,
+		SessID: r.FormValue("sessid"),
+	}
 	w.Header().Set("Content-Type", "text/html")
 	if r.Method == http.MethodPost {
 		ClientData.SearchData.ClientSearch = r.FormValue("clientsearch")
@@ -179,7 +236,7 @@ func search(w http.ResponseWriter, r *http.Request) {
 				},
 				"sessionID": &sqs.MessageAttributeValue{
 					DataType:    aws.String("String"),
-					StringValue: aws.String(sessID),
+					StringValue: aws.String(ClientData.SessID),
 				},
 				"timestamp": &sqs.MessageAttributeValue{
 					DataType:    aws.String("String"),
@@ -200,7 +257,24 @@ func search(w http.ResponseWriter, r *http.Request) {
 			log.Errorf("Could not send message to SQS queue: %v", err)
 		} else {
 			log.Infof("Message sent to SQS. MessageID: %v", *result.MessageId)
-			ClientData.SearchData.SearchResult = <-SearchDone
+			for {
+				msgrx := <-SearchDone
+				if ClientData.SessID != msgrx.SessID {
+					sqssvc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+						QueueUrl:          &outboxURL,
+						ReceiptHandle:     msgrx.RXMSG.Messages[0].ReceiptHandle,
+						VisibilityTimeout: aws.Int64(0),
+					})
+					continue
+				} else {
+					ClientData.SearchData.SearchResult = msgrx.Body
+					err = DeleteMSGSQS(msgrx.RXMSG)
+					if err != nil {
+						log.Errorf("Could not delete msg after processing: %v", err)
+					}
+					break
+				}
+			}
 		}
 
 	}
@@ -212,6 +286,12 @@ func search(w http.ResponseWriter, r *http.Request) {
 }
 
 func download(w http.ResponseWriter, r *http.Request) {
+	cmdint, _ := strconv.Atoi(r.FormValue("cmd"))
+	ClientData := ClientStruct{
+		Client: r.FormValue("client"),
+		Cmd:    cmdint,
+		SessID: r.FormValue("sessid"),
+	}
 	w.Header().Set("Content-Type", "text/html")
 	if r.Method == http.MethodPost {
 		ClientData.DownloadUser = r.FormValue("downloaduser")
@@ -238,7 +318,7 @@ func download(w http.ResponseWriter, r *http.Request) {
 func ReceiveMSGS() {
 	for {
 		RXmsginput := &sqs.ReceiveMessageInput{
-			MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd"}),
+			MessageAttributeNames: aws.StringSlice([]string{"clientName", "sessionID", "cmd", "timestamp"}),
 			QueueUrl:              &outboxURL,
 			MaxNumberOfMessages:   aws.Int64(1),
 			WaitTimeSeconds:       aws.Int64(1),
@@ -259,23 +339,32 @@ func ReceiveMSGS() {
 		sessIDRX := *msgRX.MessageAttributes["sessionID"].StringValue
 		cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
 		cRX, _ := strconv.Atoi(cmdRX)
-		if sessID != sessIDRX {
-			continue
-		}
 
+		fmt.Println(msgRX)
 		if cRX == 1 { // ECHO
-			ReceivedEcho <- textRX
+			rxmsgchan := RXMsgStruct{
+				Body:   textRX,
+				SessID: sessIDRX,
+				RXMSG:  resultRX,
+			}
+			ReceivedEcho <- rxmsgchan
 		} else if cRX == 2 { // SEARCH
 			if textRX == "EMPTY CONVERSATION" {
+				rxmsgchan := RXMsgStruct{
+					Body:   textRX,
+					SessID: sessIDRX,
+					RXMSG:  resultRX,
+				}
 				log.Warnf("Could not find any lines containing that sentence for that client.")
-				SearchDone <- textRX
+				SearchDone <- rxmsgchan
 			} else {
-				SearchDone <- PrintFilteredFile(textRX)
+				rxmsgchan := RXMsgStruct{
+					Body:   PrintFilteredFile(textRX),
+					SessID: sessIDRX,
+					RXMSG:  resultRX,
+				}
+				SearchDone <- rxmsgchan
 			}
-		}
-		err = DeleteMSGSQS(resultRX)
-		if err != nil {
-			log.Errorf("Could not delete msg after processing: %v", err)
 		}
 
 	}
@@ -386,7 +475,7 @@ func DownloadConversation(client string) error {
 	for _, item := range resp.Contents {
 		downloadPath := *item.Key
 		// Local session file
-		f, err := os.OpenFile(downloadPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		f, err := os.OpenFile(downloadPath, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return fmt.Errorf("Failed to create file %q, %v", downloadPath, err)
 		}

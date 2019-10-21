@@ -200,6 +200,11 @@ func ProcessRXMessage(msg *sqs.Message) error {
 			os.Remove(newFileName)
 		}
 	} else {
+		sqssvc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+			QueueUrl:          &inboxURL,
+			ReceiptHandle:     msg.ReceiptHandle,
+			VisibilityTimeout: aws.Int64(0),
+		})
 		return fmt.Errorf("This message was not for the search app.")
 	}
 	return nil
@@ -220,7 +225,7 @@ func DownloadConversation(client string) error {
 	for _, item := range resp.Contents {
 		downloadPath := *item.Key
 		// Create a file to write the S3 Object contents to.
-		f, err := os.OpenFile(downloadPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		f, err := os.OpenFile(downloadPath, os.O_RDWR|os.O_CREATE, 0777)
 		if err != nil {
 			log.Errorf("Failed to create file %q, %v", downloadPath, err)
 			continue

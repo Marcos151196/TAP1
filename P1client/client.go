@@ -213,6 +213,11 @@ func ReceiveMSGS() {
 		cmdRX := *msgRX.MessageAttributes["cmd"].StringValue
 		cRX, _ := strconv.Atoi(cmdRX)
 		if sessID != sessIDRX {
+			sqssvc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+				QueueUrl:          &outboxURL,
+				ReceiptHandle:     msgRX.ReceiptHandle,
+				VisibilityTimeout: aws.Int64(0),
+			})
 			continue
 		}
 

@@ -180,6 +180,11 @@ func ProcessRXMessage(msg *sqs.Message) error {
 			}
 		}
 	} else {
+		sqssvc.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{
+			QueueUrl:          &inboxURL,
+			ReceiptHandle:     msg.ReceiptHandle,
+			VisibilityTimeout: aws.Int64(0),
+		})
 		return fmt.Errorf("This message was not for the echo app.")
 	}
 	return nil
